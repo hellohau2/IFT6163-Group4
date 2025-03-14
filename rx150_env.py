@@ -30,6 +30,11 @@ RX150 Joint list (from URDF) :
 
 class RX150Env(gym.Env):
 
+    '''
+    Basic env for the RX150 robot arm. The goal is simply for the end effector (joint 11 : 'ee_gripper') to reach a target position (randomly generated around the center).
+    More information about the observations, actions and rewards are explained in the functions below.
+    '''
+
     def __init__(self,urdf_path, epsilon_dist=0.1, max_timesteps=1000, step_size=0.1, headless=False):
         '''
             urdf_path (str) : path to urdf for robot arm
