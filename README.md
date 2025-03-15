@@ -10,3 +10,6 @@ The current goal is to reach a target position randomly generated within a 1.5 u
 Due to memory limitation, the images are required to be downscaled to 84x84x3 pixels, which essentially removes depth, the red sphere also becomes a couple of pixels big.
 
 As such, a current main limitation is that, even for a human observer, it is very hard to tell the depth and position of the red sphere, as well as how far/close the green end-effector is from the target position.
+
+Here is an example of what the model and CLIP see : 
+![image](https://github.com/user-attachments/assets/6108018f-6ed7-4847-9530-d57b875fb4a7)
