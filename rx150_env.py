@@ -48,8 +48,8 @@ class RX150Env(gym.Env):
         headless=False, 
         image_width=480, 
         image_height=640, 
-        goal_prompt = "A 3D model of a robot arm and a red dot with a blue end-effector. The robot arm's blue end effector is not touching the red dot",
-        baseline_prompt = "A 3D model of a robot arm and a red dot with a blue end-effector.",
+        goal_prompt = "A 3D model of a robot arm and a red dot with a green end-effector. The robot arm's green end effector is not touching the red dot",
+        baseline_prompt = "A 3D model of a robot arm and a red dot with a green end-effector.",
         clip_reg_alpha = 0.5,
         ):
 
@@ -73,7 +73,7 @@ class RX150Env(gym.Env):
 
         self.viewMatrix = p.computeViewMatrixFromYawPitchRoll(
             cameraTargetPosition=[0, 0, 0],
-            distance=2,
+            distance=3,
             yaw=180,
             pitch=-45,
             roll=0,
@@ -160,9 +160,9 @@ class RX150Env(gym.Env):
     
             color = [0, 0, 0, 1]
 
-            # If end effector, make it blue
+            # If end effector, make it green
             if link_idx >= 6 :
-                color = [0, 0, 1, 1]
+                color = [0, 1, 0, 1]
 
             p.changeVisualShape(
                 objectUniqueId=self.robot_id,
