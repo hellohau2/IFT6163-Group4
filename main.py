@@ -25,7 +25,7 @@ print(f"Using device: {device}")
 
 rx_env = RX150Env(
     urdf_path=urdf_path, 
-    headless=False,
+    headless=True,
     max_timesteps=1000,
     image_height=84,
     image_width=84
