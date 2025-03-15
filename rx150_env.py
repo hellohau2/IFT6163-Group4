@@ -236,7 +236,7 @@ class RX150Env(gym.Env):
         proj_img = (self.goal_baseline_norm_line @ image_features.T) * self.goal_baseline_norm_line
 
         # Clip regularized with the projection
-        clip_reg = 1 - 0.5 * torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)
+        clip_reg = 1 - 0.5 * torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * image_features - self.goal_baseline_norm_line)) ** 2, dim=-1)
         
         # similarity_score = (self.goal_norm_text_features @ image_features.T).squeeze(0)
 
@@ -244,8 +244,8 @@ class RX150Env(gym.Env):
         # return similarity_score.item(), done
         
         # print(f"Goal-baseline line norm : {self.goal_baseline_line.norm(dim=-1, keepdim=True).item()} , Projection norm : {proj_img.norm(dim=-1, keepdim=True).item()} , Reg 1 : {(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line).norm(dim=-1, keepdim=True))**2)}, Reg 2. : {torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)}")
-        
-        return clip_reg.item(), done
+        reward = clip_reg.item()
+        return reward , done
 
     def get_end_effector_pos(self):
         ''' Returns world position of end effector 'ee_gripper' (joint_id 11) '''
