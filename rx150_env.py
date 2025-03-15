@@ -6,6 +6,10 @@ import os
 import imageio
 import gym
 from gym.spaces import Box
+from gym.spaces import Dict
+
+from transformers import CLIPProcessor, CLIPModel
+import torch
 
 '''
 RX150 Joint list (from URDF) : 
@@ -35,7 +39,20 @@ class RX150Env(gym.Env):
     More information about the observations, actions and rewards are explained in the functions below.
     '''
 
-    def __init__(self,urdf_path, epsilon_dist=0.1, max_timesteps=1000, step_size=0.1, headless=False):
+    def __init__(
+        self,
+        urdf_path, 
+        epsilon_dist=0.1, 
+        max_timesteps=1000, 
+        step_size=0.1, 
+        headless=False, 
+        image_width=480, 
+        image_height=640, 
+        goal_prompt = "A 3D model of a robot arm and a red dot with a blue end-effector. The robot arm's blue end effector is not touching the red dot",
+        baseline_prompt = "A 3D model of a robot arm and a red dot with a blue end-effector.",
+        clip_reg_alpha = 0.5,
+        ):
+
         '''
             urdf_path (str) : path to urdf for robot arm
             epsilon_dist (float) : min distance from target position to consider it done
@@ -43,15 +60,55 @@ class RX150Env(gym.Env):
             step_size (float) : the incremental value of the joint angle (radian)
         '''
 
-        self.action_space = Box(low=-1, high=1, shape=(6,))
-        self.observation_space = Box(low=-4,high=4,shape=(10,))
-
         self.urdf_path = urdf_path
         self.joint_list = [0,1,2,3,4,9,10]
         self.epsilon_dist = epsilon_dist
         self.sqr_epsilon_dist = epsilon_dist**2
         self.max_timesteps = max_timesteps
         self.step_size = step_size
+        self.image_height = image_height
+        self.image_width = image_width
+        self.clip_reg_alpha = clip_reg_alpha
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.viewMatrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=[0, 0, 0],
+            distance=2,
+            yaw=180,
+            pitch=-45,
+            roll=0,
+            upAxisIndex=2
+        )
+
+        self.projectionMatrix = p.computeProjectionMatrixFOV(
+            fov=90,
+            aspect=float(image_width)/image_height,
+            nearVal=0.1,
+            farVal=100.0
+        )
+
+        self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
+        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+        # Goal / Baseline 
+        goal_text_input = self.clip_processor(text=[goal_prompt], return_tensors="pt", padding=True).to(self.device)
+        baseline_text_input = self.clip_processor(text=[baseline_prompt], return_tensors="pt", padding=True).to(self.device)
+
+        with torch.no_grad():
+            goal_text_features = self.clip_model.get_text_features(**{k: goal_text_input[k] for k in ["input_ids", "attention_mask"]})
+            baseline_text_features = self.clip_model.get_text_features(**{k: baseline_text_input[k] for k in ["input_ids", "attention_mask"]})
+
+        self.goal_norm_text_features = goal_text_features / goal_text_features.norm(dim=-1, keepdim=True)
+        self.baseline_norm_text_features = baseline_text_features / baseline_text_features.norm(dim=-1, keepdim=True)
+
+        self.goal_baseline_line = self.goal_norm_text_features - self.baseline_norm_text_features
+        self.goal_baseline_norm_line = self.goal_baseline_line / self.goal_baseline_line.norm(dim=-1, keepdim=True)
+
+        self.action_space = Box(low=-1, high=1, shape=(6,))
+        self.observation_space = Dict({
+            "image": Box(low=0, high=255, shape=(self.image_height, self.image_width, 3), dtype=np.uint8),
+            "joint_states": Box(low=-4, high=4, shape=(len(self.joint_list),), dtype=np.float32)
+        })
 
         self.t = 0
 
@@ -59,7 +116,6 @@ class RX150Env(gym.Env):
         else : p.connect(p.GUI)
 
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-
     
     def reset(self):
         '''
@@ -87,7 +143,7 @@ class RX150Env(gym.Env):
         )
 
         self.target_id = p.createMultiBody(
-            baseMass=0,  # Mass = 0 so it's fixed
+            baseMass=0,  # Mass = 0 so it doesn't fall
             baseVisualShapeIndex=visual_shape_id,
             basePosition=target_pos,
             baseCollisionShapeIndex=-1  # No collision
@@ -96,11 +152,41 @@ class RX150Env(gym.Env):
         self.plane_id = p.loadURDF("plane.urdf")
         self.robot_id = p.loadURDF(self.urdf_path,useFixedBase=True,globalScaling=4)
 
+        # Recolors the robot arm
+        num_joints = p.getNumJoints(self.robot_id)
+
+        # Loop over all links to recolor them
+        for link_idx in range(-1,num_joints):
+    
+            color = [0, 0, 0, 1]
+
+            # If end effector, make it blue
+            if link_idx >= 6 :
+                color = [0, 0, 1, 1]
+
+            p.changeVisualShape(
+                objectUniqueId=self.robot_id,
+                linkIndex=link_idx,
+                rgbaColor=color
+            )
+
         self.target_pos = np.array(target_pos)
 
         self.t = 0
 
         return self.get_obs()
+
+    def render(self):
+
+        _,_,rgbPixels,_,_ = p.getCameraImage(
+            width=self.image_width,
+            height = self.image_height,
+            viewMatrix=self.viewMatrix,
+            projectionMatrix=self.projectionMatrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+
+        return np.reshape(np.array(rgbPixels),(self.image_height,self.image_width,4))[:,:,:3] / 255.0
 
     def get_obs(self):
         '''
@@ -108,7 +194,7 @@ class RX150Env(gym.Env):
         Arbitrarily chosen for now : 
             - the angle (radians) of each joint (i.e joints [0,1,2,3,4] and [9,10] for the gripper fingers)
             - The gripper radians can be changed later for a binary value (open or close gripper)
-            - target (x,y,z) world position
+            - image of the rendering shape (self.image_height,self.image_width,3)
         '''
 
         ob = []
@@ -116,20 +202,50 @@ class RX150Env(gym.Env):
             curr_radian = p.getJointState(self.robot_id,joint_id)[0]
             ob.append(curr_radian)
         
-        ob.extend(self.target_pos)
+        # Also add the target's position
+        # ob.extend(self.target_pos)
 
-        return np.array(ob)
+        return {
+            "image": self.render(), 
+            "joint_states": np.array(ob),  
+        }
 
-    def get_reward_and_terminal(self):
+    def get_reward_and_terminal(self,ob = None):
         '''
-        Returns negative squared distance between the end effector and the sphere's (target) position
-        and if the environment is done or not.
+        Uses the CLIP model to get the CLIP-Reg (from paper) rewards 
+        and if the environment is done or not (if gripper is within epsilon distance from target pos).
         '''
+        
         sqr_dist_to_target = ((np.array(self.get_end_effector_pos()) - self.target_pos)**2).sum()
-
         done = (self.sqr_epsilon_dist >= sqr_dist_to_target) or (self.t >= self.max_timesteps)
 
-        return -sqr_dist_to_target, done
+        if ob is None :
+            # Get image, pass it through the clip model, compute similarity
+            rx_img = self.render()
+        else :
+            rx_img = ob['image']
+
+        image_inputs = self.clip_processor(images=rx_img, return_tensors="pt", padding=True).to(self.device)
+
+        with torch.no_grad():
+            image_features = self.clip_model.get_image_features(**{k: image_inputs[k] for k in ["pixel_values"]})
+        
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        # Projection of s (image) to the line spanned by goal - baseline
+        proj_img = (self.goal_baseline_norm_line @ image_features.T) * self.goal_baseline_norm_line
+
+        # Clip regularized with the projection
+        clip_reg = 1 - 0.5 * torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)
+        
+        # similarity_score = (self.goal_norm_text_features @ image_features.T).squeeze(0)
+
+        # return -sqr_dist_to_target, done
+        # return similarity_score.item(), done
+        
+        # print(f"Goal-baseline line norm : {self.goal_baseline_line.norm(dim=-1, keepdim=True).item()} , Projection norm : {proj_img.norm(dim=-1, keepdim=True).item()} , Reg 1 : {(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line).norm(dim=-1, keepdim=True))**2)}, Reg 2. : {torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)}")
+        
+        return clip_reg.item(), done
 
     def get_end_effector_pos(self):
         ''' Returns world position of end effector 'ee_gripper' (joint_id 11) '''
@@ -164,6 +280,7 @@ class RX150Env(gym.Env):
         else :
             discrete_ac = action
 
+        # Apply the action to each joint
         for joint_id,ac in enumerate(discrete_ac):
             
             # If using gripper
@@ -218,13 +335,15 @@ class RX150Env(gym.Env):
 
         self.t += 1
 
+        # Let the simulation roll for a few frames to allow movement
         for _ in range(skip_frames) : 
             p.stepSimulation()
 
-        reward,done = self.get_reward_and_terminal()
+        ob = self.get_obs()
+        reward,done = self.get_reward_and_terminal(ob)
         info = {}
 
-        return self.get_obs(), reward, done, info
+        return ob , reward, done, info
 
     def close(self):
         p.disconnect()
