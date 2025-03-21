@@ -4,12 +4,12 @@ import numpy as np
 import time
 import os 
 import imageio
-import gym
-from gym.spaces import Box
-from gym.spaces import Dict
+import gymnasium as gym
+from gymnasium.spaces import Box,Dict
 
 from transformers import CLIPProcessor, CLIPModel
 import torch
+import rx_utils
 
 '''
 RX150 Joint list (from URDF) : 
@@ -31,7 +31,6 @@ RX150 Joint list (from URDF) :
     11 : b'ee_gripper' , LowerLimit : 0.0 , UpperLimit : -1.0, Joint type : JOINT_FIXED
 '''
 
-
 class RX150Env(gym.Env):
 
     '''
@@ -51,6 +50,9 @@ class RX150Env(gym.Env):
         goal_prompt = "A 3D model of a robot arm and a red dot with a green end-effector. The robot arm's green end effector is not touching the red dot",
         baseline_prompt = "A 3D model of a robot arm and a red dot with a green end-effector.",
         clip_reg_alpha = 0.5,
+        frame_skip = 4,
+        use_intrinsic=True,
+        image_only=True
         ):
 
         '''
@@ -70,12 +72,15 @@ class RX150Env(gym.Env):
         self.image_width = image_width
         self.clip_reg_alpha = clip_reg_alpha
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.frame_skip = frame_skip
+        self.image_only=image_only
+        self.use_intrinsic=use_intrinsic
 
         self.viewMatrix = p.computeViewMatrixFromYawPitchRoll(
-            cameraTargetPosition=[0, 0, 0],
-            distance=3,
-            yaw=180,
-            pitch=-45,
+            cameraTargetPosition=[0.25, 0, -0.25],
+            distance=2.5,
+            yaw=90,
+            pitch=-40,
             roll=0,
             upAxisIndex=2
         )
@@ -87,53 +92,74 @@ class RX150Env(gym.Env):
             farVal=100.0
         )
 
-        self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
-        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        if not self.use_intrinsic :
+            self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
+            self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-        # Goal / Baseline 
-        goal_text_input = self.clip_processor(text=[goal_prompt], return_tensors="pt", padding=True).to(self.device)
-        baseline_text_input = self.clip_processor(text=[baseline_prompt], return_tensors="pt", padding=True).to(self.device)
+            # Goal / Baseline 
+            goal_text_input = self.clip_processor(text=[goal_prompt], return_tensors="pt", padding=True).to(self.device)
+            baseline_text_input = self.clip_processor(text=[baseline_prompt], return_tensors="pt", padding=True).to(self.device)
 
-        with torch.no_grad():
-            goal_text_features = self.clip_model.get_text_features(**{k: goal_text_input[k] for k in ["input_ids", "attention_mask"]})
-            baseline_text_features = self.clip_model.get_text_features(**{k: baseline_text_input[k] for k in ["input_ids", "attention_mask"]})
+            with torch.no_grad():
+                goal_text_features = self.clip_model.get_text_features(**{k: goal_text_input[k] for k in ["input_ids", "attention_mask"]})
+                baseline_text_features = self.clip_model.get_text_features(**{k: baseline_text_input[k] for k in ["input_ids", "attention_mask"]})
 
-        self.goal_norm_text_features = goal_text_features / goal_text_features.norm(dim=-1, keepdim=True)
-        self.baseline_norm_text_features = baseline_text_features / baseline_text_features.norm(dim=-1, keepdim=True)
+            self.goal_norm_text_features = goal_text_features / goal_text_features.norm(dim=-1, keepdim=True)
+            self.baseline_norm_text_features = baseline_text_features / baseline_text_features.norm(dim=-1, keepdim=True)
 
-        self.goal_baseline_line = self.goal_norm_text_features - self.baseline_norm_text_features
-        self.goal_baseline_norm_line = self.goal_baseline_line / self.goal_baseline_line.norm(dim=-1, keepdim=True)
+            self.goal_baseline_line = self.goal_norm_text_features - self.baseline_norm_text_features
+            self.goal_baseline_norm_line = self.goal_baseline_line / self.goal_baseline_line.norm(dim=-1, keepdim=True)
+
+        # Use RND to get an exploration reward as seen in class
+        else : 
+            self.expl_net = rx_utils.ExplNet(out_dim=64,lr=1e-3).to(self.device)
 
         self.action_space = Box(low=-1, high=1, shape=(6,))
-        self.observation_space = Dict({
-            "image": Box(low=0, high=255, shape=(self.image_height, self.image_width, 3), dtype=np.uint8),
-            "joint_states": Box(low=-4, high=4, shape=(len(self.joint_list),), dtype=np.float32)
-        })
+
+        if self.image_only : 
+            self.observation_space = Box(low=0, high=255, shape=(self.image_height, self.image_width, 3), dtype=np.uint8)
+        else :             
+            self.observation_space = Dict({
+                "image": Box(low=0, high=255, shape=(self.image_height, self.image_width, 3), dtype=np.uint8),
+                "joint_states": Box(low=-4, high=4, shape=(len(self.joint_list),), dtype=np.float32)
+            })
+
 
         self.t = 0
 
-        if headless : p.connect(p.DIRECT)
-        else : p.connect(p.GUI)
+        if headless : 
+            p.connect(p.DIRECT)
+            self.renderer = p.ER_TINY_RENDERER
+        else : 
+            p.connect(p.GUI)
+            self.renderer = p.ER_BULLET_HARDWARE_OPENGL
 
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
+
+        self.last_state = {}
     
-    def reset(self):
+    def reset(self, seed = None, option = None):
         '''
         Resets the environment and generates a target pos (displayed as a red sphere)
         The current sphere pos generator is using rejection sampling and is very inefficient
         '''
 
+        if seed is not None:
+            np.random.seed(seed)
+
         p.resetSimulation()
         p.setGravity(0,0,-9.81)
 
-        it = 0
-        while True:
-            it += 1
-            target_pos = np.random.uniform(-1.5,1.5,size=3)
-            if np.linalg.norm(target_pos) >= 1 and np.linalg.norm(target_pos) <= 1.5 and target_pos[2] > 0.25 : 
-                break
+        # it = 0
+        # while True:
+        #     it += 1
+        #     target_pos = np.random.uniform(-1.5,1.5,size=3)
+        #     if np.linalg.norm(target_pos) >= 1 and np.linalg.norm(target_pos) <= 1.5 and target_pos[2] > 0.25 : 
+        #         break
+
+        target_pos = np.array([1.5,1,0.5])
         
-        print(f"Generated random target pos in {it} iterations")
+        # print(f"Generated random target pos in {it} iterations")
 
         sphere_radius = 0.05
         visual_shape_id = p.createVisualShape(
@@ -174,7 +200,7 @@ class RX150Env(gym.Env):
 
         self.t = 0
 
-        return self.get_obs()
+        return self.get_obs(), {}
 
     def render(self):
 
@@ -183,10 +209,10 @@ class RX150Env(gym.Env):
             height = self.image_height,
             viewMatrix=self.viewMatrix,
             projectionMatrix=self.projectionMatrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL
+            renderer= self.renderer
         )
 
-        return np.reshape(np.array(rgbPixels),(self.image_height,self.image_width,4))[:,:,:3] / 255.0
+        return np.reshape(np.array(rgbPixels),(self.image_height,self.image_width,4))[:,:,:3]
 
     def get_obs(self):
         '''
@@ -196,6 +222,9 @@ class RX150Env(gym.Env):
             - The gripper radians can be changed later for a binary value (open or close gripper)
             - image of the rendering shape (self.image_height,self.image_width,3)
         '''
+        
+        if self.image_only:
+            return self.render()
 
         ob = []
         for joint_id in self.joint_list:
@@ -223,35 +252,50 @@ class RX150Env(gym.Env):
             # Get image, pass it through the clip model, compute similarity
             rx_img = self.render()
         else :
-            rx_img = ob['image']
+            if self.image_only :
+                rx_img = ob
+            else : 
+                rx_img = ob['image']
 
-        image_inputs = self.clip_processor(images=rx_img, return_tensors="pt", padding=True).to(self.device)
+        # Use exploration RND as reward
+        if self.use_intrinsic:
+            
+            x = torch.tensor(rx_img, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
+            x = x.to(self.device)
 
-        with torch.no_grad():
-            image_features = self.clip_model.get_image_features(**{k: image_inputs[k] for k in ["pixel_values"]})
+            reward = self.expl_net(x).item()
+            self.expl_net.update(x)
+
+        # Otherwise just use CLIP rewards (not effective)
+        else : 
+            image_inputs = self.clip_processor(images=rx_img, return_tensors="pt", padding=True).to(self.device)
+
+            with torch.no_grad():
+                image_features = self.clip_model.get_image_features(**{k: image_inputs[k] for k in ["pixel_values"]})
+            
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+            # Projection of s (image) to the line spanned by goal - baseline
+            proj_img = (self.goal_baseline_norm_line @ image_features.T) * self.goal_baseline_norm_line
+
+            # Clip regularized with the projection
+            clip_reg = 1 - 0.5 * torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * image_features - self.goal_baseline_norm_line)) ** 2, dim=-1)
+            
+            # similarity_score = (self.goal_norm_text_features @ image_features.T).squeeze(0)
+
+            # return -sqr_dist_to_target, done
+            # return similarity_score.item(), done
+            
+            # print(f"Goal-baseline line norm : {self.goal_baseline_line.norm(dim=-1, keepdim=True).item()} , Projection norm : {proj_img.norm(dim=-1, keepdim=True).item()} , Reg 1 : {(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line).norm(dim=-1, keepdim=True))**2)}, Reg 2. : {torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)}")
+            reward = clip_reg.item()
         
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-
-        # Projection of s (image) to the line spanned by goal - baseline
-        proj_img = (self.goal_baseline_norm_line @ image_features.T) * self.goal_baseline_norm_line
-
-        # Clip regularized with the projection
-        clip_reg = 1 - 0.5 * torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * image_features - self.goal_baseline_norm_line)) ** 2, dim=-1)
-        
-        # similarity_score = (self.goal_norm_text_features @ image_features.T).squeeze(0)
-
-        # return -sqr_dist_to_target, done
-        # return similarity_score.item(), done
-        
-        # print(f"Goal-baseline line norm : {self.goal_baseline_line.norm(dim=-1, keepdim=True).item()} , Projection norm : {proj_img.norm(dim=-1, keepdim=True).item()} , Reg 1 : {(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line).norm(dim=-1, keepdim=True))**2)}, Reg 2. : {torch.sum(((self.clip_reg_alpha * proj_img + (1 - self.clip_reg_alpha) * self.goal_baseline_line)) ** 2, dim=-1)}")
-        reward = clip_reg.item()
         return reward , done
 
     def get_end_effector_pos(self):
         ''' Returns world position of end effector 'ee_gripper' (joint_id 11) '''
         return p.getLinkState(self.robot_id, 11)[0]
 
-    def step(self, action, skip_frames = 4):
+    def step(self, action, simulation_steps = 4):
 
         '''
         action is an np.array of 6 int values each being either [-1,0,1]
@@ -266,8 +310,9 @@ class RX150Env(gym.Env):
                 4 : Wrist rotate
                 5 : Gripper
 
-        skip_frames : int indicating the number of frames to 'skip' (apply the same action). The next observation and reward are obtained after skip_frames
+        simulation_steps : int indicating the number of frames to simulate (apply the same action). The next observation and reward are obtained after simulation_steps
         '''
+        self.t += 1
         
         # Checks if received floats, in which case round them to nearest correct action values
         if isinstance(action[0], float):
@@ -333,17 +378,16 @@ class RX150Env(gym.Env):
                     force=joint_max_force
                 )
 
-        self.t += 1
-
         # Let the simulation roll for a few frames to allow movement
-        for _ in range(skip_frames) : 
+        for _ in range(simulation_steps) : 
             p.stepSimulation()
 
         ob = self.get_obs()
         reward,done = self.get_reward_and_terminal(ob)
+        truncated = self.t >= self.max_timesteps
         info = {}
 
-        return ob , reward, done, info
+        return ob , reward, done,truncated, info
 
     def close(self):
         p.disconnect()

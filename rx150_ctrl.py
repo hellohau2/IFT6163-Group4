@@ -40,10 +40,10 @@ while True :
     ob = rx_env.get_obs()
     action = model.predict(ob)[0]
 
-    _,rw,done,_ = rx_env.step(action)
+    _,rw,done,_,_ = rx_env.step(action)
 
-    if total_it % 100 == 0 :
-        print(f"reward : {rw}")
+    if total_it % 10 == 0 :
+        print(f"reward : {rw}, sqr dist : {((np.array(rx_env.get_end_effector_pos()) - rx_env.target_pos)**2).sum()}")
 
     if done : 
         print("TARGET REACHED")
