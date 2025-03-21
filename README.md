@@ -13,4 +13,4 @@ As such, a current main limitation is that, even for a human observer, it is ver
 
 Here is an example of what the model and CLIP see : 
 
-![image](https://github.com/user-attachments/assets/6108018f-6ed7-4847-9530-d57b875fb4a7)
+![image](example_image.png)

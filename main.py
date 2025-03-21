@@ -17,7 +17,7 @@ import time
 import imageio
 import torch
 
-from rx150_env import RX150Env
+from rx150.rx150_env import RX150Env
 
 urdf_path = "/interbotix_ros_manipulators/interbotix_ros_xsarms/interbotix_xsarm_descriptions/urdf/rx150.urdf"
 
