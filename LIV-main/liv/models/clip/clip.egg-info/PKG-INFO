@@ -1,0 +1,11 @@
+Metadata-Version: 2.2
+Name: clip
+Version: 1.0
+Author: OpenAI
+Requires-Dist: ftfy
+Requires-Dist: regex
+Requires-Dist: tqdm
+Requires-Dist: torch
+Requires-Dist: torchvision
+Dynamic: author
+Dynamic: requires-dist
