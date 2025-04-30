@@ -4,29 +4,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
+import gymnasium as gym
 from gymnasium.wrappers import ResizeObservation
-from gymnasium.core import ActionWrapper
-from gymnasium import spaces
-
 from stable_baselines3 import SAC
 
 from robot_env import RobotEnv
+from clip_reward import CLIPReward
+from reward_wrappers import ClipRewardWrapper
+from pad_gripper import PadGripper
 
 # ActionWrapper to pad 4D actions into the 5D action space expected by RobotEnv
-class PadGripper(ActionWrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-
-    def action(self, action_4d):
-        full_action = np.zeros(5, dtype=np.float32)
-        full_action[:4] = action_4d
-        return full_action
-
-
 def make_env():
     raw = RobotEnv()
-    resized = ResizeObservation(raw, shape=(64,64))
+    reward_model = CLIPReward(goal_text="a robot arm grasping a red block")
+    wrapped = ClipRewardWrapper(raw, reward_model=reward_model)
+    resized = ResizeObservation(wrapped, shape=(64, 64))
     return resized
 
 
@@ -42,6 +34,7 @@ def record_episode(env, model, video_path=None, max_steps=200):
     terminated = False
     truncated = False
     step = 0
+    
 
     while not terminated and not truncated and step < max_steps:
         if video_path is not None:
@@ -51,6 +44,7 @@ def record_episode(env, model, video_path=None, max_steps=200):
         obs_pi = np.transpose(obs, (2,0,1))[None]  # batch
         action4d, _ = model.predict(obs_pi, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action4d[0])
+        reward = info.get("total_reward", reward)
         total_reward += reward
         step += 1
 
@@ -73,6 +67,7 @@ def evaluate_model(model, env, n_episodes=20, video_prefix=None):
             video_file = os.path.join("videos", f"{video_prefix}_ep{idx}.mp4")
         total_reward = record_episode(env, model, video_file)
         rewards.append(total_reward)
+        print(f"Episode {idx} reward: {total_reward}")
     return rewards
 
 def export_results_to_csv(results_dict, filename="results.csv"):
