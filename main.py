@@ -1,53 +1,87 @@
-'''
-in console (if using lightning.ai) to forward the display to browser : 
+from __future__ import annotations
 
-Xvfb :99 -screen 0 1920x1080x24 & export DISPLAY=:99
-x11vnc -display :99 -rfbport 5901 -shared -forever &
-websockify --web=/usr/share/novnc 8090 localhost:5901 
-'''
-
-from stable_baselines3 import DDPG,TD3,PPO,SAC
-from stable_baselines3.common.vec_env import DummyVecEnv,SubprocVecEnv
-from stable_baselines3.common.monitor import Monitor
 import os
-import pybullet as p
-import pybullet_data
-import numpy as np
-import time
-import imageio
+from pathlib import Path
+from typing import Callable
+
 import torch
+from stable_baselines3 import SAC  
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 
-from rx150.rx150_env import RX150Env
+from gazebo_rx150_env_clean import GazeboRX150Env  
+from encoders import R3MExtractor                 # frozen vision backbone
 
-urdf_path = "/interbotix_ros_manipulators/interbotix_ros_xsarms/interbotix_xsarm_descriptions/urdf/rx150.urdf"
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# Environment factory                                                         
 
-log_dir = "./logs"
-os.makedirs(log_dir, exist_ok=True)
+def make_env() -> Callable[[], Monitor]:
+    """Return a *callable* that builds one wrapped env for DummyVecEnv."""
+    def _init() -> Monitor:
+        env = GazeboRX150Env()
+        return Monitor(env)
 
-def make_env():
-    env = RX150Env(
-        urdf_path=urdf_path, 
-        headless=True,
-        max_timesteps=1000,
-        image_height=64,
-        image_width=64
+    return _init
+
+
+# Simple periodic print‑callback                                              
+
+class PrintStepCallback(BaseCallback):
+    """Print a tick every *n* calls when learning."""
+
+    def __init__(self, total_steps: int, interval: int = 100):
+        super().__init__(verbose=0)
+        self.total = total_steps
+        self.interval = interval
+
+    def _on_step(self) -> bool:  # noqa: D401
+        if self.n_calls % self.interval == 0:
+            print(f"step {self.n_calls:>6}/{self.total}")
+        return True
+
+
+# Main training routine                                                       
+
+def main() -> None:  # noqa: D401
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    env = VecTransposeImage(DummyVecEnv([make_env()]))
+
+    # R3M frozen feature extractor + 2‑layer 256‑unit MLP for π and Q‑networks
+    policy_kwargs = dict(
+        features_extractor_class=R3MExtractor,
+        net_arch=[256, 256],
     )
-    env = Monitor(env, log_dir)
-    return env
+
+    model = SAC(
+        policy="MlpPolicy",
+        env=env,
+        device=device,
+        batch_size=64,
+        buffer_size=100_000,
+        learning_rate=3e-4,
+        gamma=0.99,
+        tau=0.005,
+        tensorboard_log="./tensorboard_logs/",
+        verbose=1,
+        policy_kwargs=policy_kwargs,
+    )
+
+    total_steps = 100_000
+    model.learn(
+        total_timesteps=total_steps,
+        callback=[PrintStepCallback(total_steps)],
+        tb_log_name="SAC_R3M_ETRGA",
+        progress_bar=True,
+    )
+
+    out_dir = Path("models"); out_dir.mkdir(exist_ok=True)
+    model_path = out_dir / "rx150_sac_etrga_r3m"
+    model.save(model_path)
+    print(" training complete - model saved to", model_path)
+
 
 if __name__ == "__main__":
-    
-    # Create one env per CPU CORE
-    envs = SubprocVecEnv([make_env for _ in range(12)])
-
-    # Create model
-    model = SAC("CnnPolicy", envs, verbose=1, device=device)
-
-    # Train
-    model.learn(total_timesteps=500_000)
-
-    # Save the trained model
-    model.save("sac_rx150_expl")
+    main()
