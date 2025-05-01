@@ -255,6 +255,40 @@ class GazeboRX150Env(gym.Env):
 
     # Gymnasium API                                                       #
 
+    def _eef_pose(self) -> np.ndarray:
+        """
+        Get the current end-effector pose in the world frame.
+
+        Returns:
+            np.ndarray of shape (6,) and dtype float32: 
+            [x, y, z, roll, pitch, yaw].
+            If TF lookup fails, returns zeros.
+        """
+        try:
+            # Lookup transform from world → end-effector
+            trans: TransformStamped = self.tf_buffer.lookup_transform(
+                BASE_FRAME,
+                EE_FRAME,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1),
+            )
+            # Translation
+            x = trans.transform.translation.x
+            y = trans.transform.translation.y
+            z = trans.transform.translation.z
+
+            # Rotation → Euler angles
+            q = trans.transform.rotation
+            roll, pitch, yaw = euler_from_quaternion(
+                [q.x, q.y, q.z, q.w], axes="sxyz"
+            )
+
+            return np.array([x, y, z, roll, pitch, yaw], dtype=np.float32)
+
+        except Exception as exc:
+            self.node.get_logger().warn(f"[ _eef_pose ] TF lookup failed: {exc}")
+            return np.zeros(6, dtype=np.float32)
+
     def _quality_at_eef(self, eef_world: np.ndarray, q_map: np.ndarray) -> float:
         """Return ETRGA quality **Q(u,v)** at the current end‑effector tip.
 
