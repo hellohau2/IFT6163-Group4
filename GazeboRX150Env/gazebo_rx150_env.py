@@ -46,20 +46,24 @@ class GazeboRX150Env(gym.Env):
     @torch.no_grad()
     def _reward(self, img):
         if img is None: return 0.
-        feat = self.clip.encode_image(self.prep(PIL.fromarray(img))
-                                      .unsqueeze(0).to(self.device))
+        feat = self.clip.encode_image(self.prep(PIL.fromarray(img)).unsqueeze(0).to(self.device))
         feat = feat/feat.norm(dim=-1, keepdim=True)
         r, dbg = 0., {}
+
         for cls,w in self.weights.items():
-            if cls not in self.cents: continue
+            if cls not in self.cents: 
+                continue
             s = (feat @ self.cents[cls].to(self.device).T).item()
-            r += w*s; dbg[cls]=s
+            r += w*s
+            dbg[cls]=s
+
         if random.random()<.05:
             ts=str(int(time.time()*1e3))
             PIL.fromarray(img).save(f"{self.debug_dir}/{ts}.png")
             with open(f"{self.debug_dir}/{ts}.txt","w") as f:
-                for k,v in dbg.items(): f.write(f"{k} {v:.3f}\n")
-                f.write(f"reward {r:.3f}\n")
+                for k,v in dbg.items(): 
+                    f.write(f"{k} {v:.3f}\n")
+                    f.write(f"reward {r:.3f}\n")
         return r
 
     def step(self, action):
@@ -67,21 +71,33 @@ class GazeboRX150Env(gym.Env):
         arm, grip = action[:5], action[5]
         # publish arm
         jt = JointTrajectory(); jt.joint_names=["shoulder","elbow","wrist_angle","wrist_rotate","waist"]
-        pt = JointTrajectoryPoint(); pt.positions=(np.clip(arm,-1,1)*(math.pi/2)).tolist(); pt.time_from_start.sec=1
-        jt.points.append(pt); self.arm_pub.publish(jt)
+        pt = JointTrajectoryPoint()
+        pt.positions=(np.clip(arm,-1,1)*(math.pi/2)).tolist()
+        pt.time_from_start.sec=1
+        jt.points.append(pt)
+        self.arm_pub.publish(jt)
         # publish gripper
-        gt = JointTrajectory(); gt.joint_names=["left_finger","right_finger"]
-        gp = JointTrajectoryPoint(); p=float(np.clip(grip,-1,1)*0.3); gp.positions=[p,p]; gp.time_from_start.sec=1
-        gt.points.append(gp); self.grip_pub.publish(gt)
+        gt = JointTrajectory()
+        gt.joint_names=["left_finger","right_finger"]
+        gp = JointTrajectoryPoint()
+        p=float(np.clip(grip,-1,1)*0.3)
+        gp.positions=[p,p]
+        gp.time_from_start.sec=1
+        gt.points.append(gp)
+        self.grip_pub.publish(gt)
 
         rclpy.spin_once(self.node)
-        obs = self.current_image.copy(); rew=self._reward(obs)
+        obs = self.current_image.copy()
+        rew=self._reward(obs)
         trunc = self.current_step>=self.max_steps
         return obs, rew, False, trunc, {}
 
     def reset(self,*_,**__):
         self.current_step=0; self.current_image=None
-        while self.current_image is None: rclpy.spin_once(self.node,timeout_sec=0.1)
+        while self.current_image is None: 
+            rclpy.spin_once(self.node,timeout_sec=0.1)
         return self.current_image.copy(),{}
 
-    def close(self): self.node.destroy_node(); rclpy.shutdown()
+    def close(self): 
+        self.node.destroy_node()
+        rclpy.shutdown()
