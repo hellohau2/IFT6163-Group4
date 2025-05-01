@@ -11,41 +11,38 @@ class GazeboRX150Env(gym.Env):
     def __init__(self, img_size=224, centroid_file="centroids.pt"):
         super().__init__()
         self.img_size, self.max_steps, self.current_step = img_size, 200, 0
-        rclpy.init(args=None); self.node = Node("gazebo_rx150_env")
+        rclpy.init(args=None)
+        self.node = Node("gazebo_rx150_env")
         self.bridge, self.current_image = CvBridge(), None
-        self.node.create_subscription(Image, "/camera1/camera1/image_raw",
-                                      self._cb, 10)
+        self.node.create_subscription(Image, "/camera1/camera1/image_raw",self._cb, 10)
         # publishers
-        self.arm_pub = self.node.create_publisher(
-            JointTrajectory, "/rx150/arm_controller/joint_trajectory", 10)
-        self.grip_pub = self.node.create_publisher(
-            JointTrajectory, "/rx150/gripper_controller/joint_trajectory", 10)
+        self.arm_pub = self.node.create_publisher(JointTrajectory, "/rx150/arm_controller/joint_trajectory", 10)
+        self.grip_pub = self.node.create_publisher(JointTrajectory, "/rx150/gripper_controller/joint_trajectory", 10)
 
         self.action_space = spaces.Box(-1., 1., (6,), np.float32)
-        self.observation_space = spaces.Box(0, 255,
-                                            (img_size, img_size, 3), np.uint8)
+        self.observation_space = spaces.Box(0, 255,(img_size, img_size, 3), np.uint8)
 
         # CLIP
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.clip, _, self.prep = open_clip.create_model_and_transforms(
-            "ViT-L-14-quickgelu", pretrained="openai", device=self.device)
+        self.clip, _, self.prep = open_clip.create_model_and_transforms("ViT-L-14-quickgelu", pretrained="openai", device=self.device)
         self.clip.eval()
 
         # centroids
         if not os.path.exists(centroid_file):
             raise FileNotFoundError("Run build_centroids.py first")
         self.cents = torch.load(centroid_file, map_location=self.device)
-        self.weights = {"success":10, "partial_close":4,
-                        "partial_far":2, "fail":-10}
+        self.weights = {"success":10, "partial_close":4,"partial_far":2, "fail":-10}
 
-        self.debug_dir = "./reward_debug_images"; os.makedirs(self.debug_dir, exist_ok=True)
+        self.debug_dir = "./reward_debug_images"
+        os.makedirs(self.debug_dir, exist_ok=True)
 
     def _cb(self, msg):
         self.current_image = self.bridge.imgmsg_to_cv2(msg, "rgb8")
 
     @torch.no_grad()
     def _reward(self, img):
-        if img is None: return 0.
+        if img is None: 
+            return 0.
         feat = self.clip.encode_image(self.prep(PIL.fromarray(img)).unsqueeze(0).to(self.device))
         feat = feat/feat.norm(dim=-1, keepdim=True)
         r, dbg = 0., {}

@@ -28,7 +28,7 @@ def main(root):
         c = centroid(path, preprocess, device, model)
         if c is not None:
             cents[sub] = c
-            print(f"✔ {sub:14s} {len(os.listdir(path))} imgs")
+            print(f"{sub:14s} {len(os.listdir(path))} imgs")
     torch.save(cents, "centroids.pt")
     print("Saved centroids.pt with", len(cents), "classes")
 
